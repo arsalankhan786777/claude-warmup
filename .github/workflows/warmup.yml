@@ -1,10 +1,8 @@
 name: Claude Warmup
-
 on:
   schedule:
     - cron: '0 */5 * * *'
   workflow_dispatch:
-
 jobs:
   warmup:
     runs-on: ubuntu-latest
@@ -15,17 +13,14 @@ jobs:
           DELAY=$(( (RANDOM % 10 + 1) * 60 ))
           echo "Sleeping $((DELAY/60)) minutes"
           sleep $DELAY
-
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
-
       - name: Ping all accounts
         env:
           CLAUDE_TOKENS: ${{ secrets.CLAUDE_TOKENS }}
         run: |
-          mapfile -t TOKENS < <(echo "$CLAUDE_TOKENS" | jq -r '.[]')
-          for i in "${!TOKENS[@]}"; do
-            NUM=$((i+1))
-            echo "=== Pinging account $NUM ==="
-            CLAUDE_CODE_OAUTH_TOKEN="${TOKENS[$i]}" claude -p "ok" --model haiku </dev/null || echo "Account $NUM failed, continuing..."
+          for account in $(echo "$CLAUDE_TOKENS" | jq -r 'keys[]'); do
+            TOKEN=$(echo "$CLAUDE_TOKENS" | jq -r --arg acc "$account" '.[$acc]')
+            echo "=== Pinging account: $account ==="
+            CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" claude -p "ok" --model haiku </dev/null || echo "$account failed, continuing..."
           done
