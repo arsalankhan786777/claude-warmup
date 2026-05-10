@@ -1,8 +1,13 @@
 name: Claude Warmup
 on:
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '0 */3 * * *'
   workflow_dispatch:
+
+concurrency:
+  group: claude-warmup
+  cancel-in-progress: false
+
 jobs:
   warmup:
     runs-on: ubuntu-latest
@@ -10,17 +15,43 @@ jobs:
     steps:
       - name: Random delay 1-10 min
         run: |
-          DELAY=$(( (RANDOM % 10 + 1) * 60 ))
-          echo "Sleeping $((DELAY/60)) minutes"
+          DELAY=$(shuf -i 60-600 -n 1)
+          echo "Sleeping $((DELAY/60))m ($DELAY s)"
           sleep $DELAY
+
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
+
       - name: Ping all accounts
         env:
           CLAUDE_TOKENS: ${{ secrets.CLAUDE_TOKENS }}
         run: |
+          set -uo pipefail
+          OK=0; LIMITED=0; AUTH_FAIL=0; OTHER_FAIL=0
+          AUTH_LIST=""; OTHER_LIST=""
+
           for account in $(echo "$CLAUDE_TOKENS" | jq -r 'keys[]'); do
             TOKEN=$(echo "$CLAUDE_TOKENS" | jq -r --arg acc "$account" '.[$acc]')
-            echo "=== Pinging account: $account ==="
-            CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" claude -p "ok" --model haiku </dev/null || echo "$account failed, continuing..."
+            echo ""
+            echo "=== $account ==="
+
+            OUTPUT=$(timeout 90 env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" \
+              claude -p "ok" --model haiku </dev/null 2>&1) || true
+            echo "$OUTPUT"
+
+            if echo "$OUTPUT" | grep -qiE "401|invalid auth"; then
+              AUTH_FAIL=$((AUTH_FAIL+1)); AUTH_LIST="$AUTH_LIST $account"
+            elif echo "$OUTPUT" | grep -qiE "hit your limit|rate.?limit"; then
+              LIMITED=$((LIMITED+1)); OK=$((OK+1))
+            elif [ -n "$OUTPUT" ]; then
+              OK=$((OK+1))
+            else
+              OTHER_FAIL=$((OTHER_FAIL+1)); OTHER_LIST="$OTHER_LIST $account"
+            fi
           done
+
+          echo ""
+          echo "=== Summary ==="
+          echo "Working: $OK  (of which rate-limited: $LIMITED)"
+          echo "Auth failed (regenerate token):$AUTH_LIST"
+          echo "Other failed:$OTHER_LIST"
