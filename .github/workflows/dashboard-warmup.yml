@@ -53,8 +53,10 @@ jobs:
           RAND_ORDER=$(jq -r '.config.randomizeOrder // true' due.json)
           JITTER_SEC=$(jq -r '.config.perAccountJitterSec // 30' due.json)
 
-          # innocuous, human-looking warmup messages (varied to avoid a fixed signature)
-          POOL=("ok" "hi" "hey" "hello" "thanks" "got it" "cool" "yep" "sounds good" "great" "noted" "sure" "thanks!" "ok cool" "perfect")
+          # warmup prompt pool comes from the dashboard settings (editable there).
+          # Kept short so replies stay tiny and use minimal tokens.
+          mapfile -t POOL < <(jq -r '.config.prompts[]?' due.json)
+          [ "${#POOL[@]}" -eq 0 ] && POOL=("ok")
 
           # account rows, optionally shuffled
           mapfile -t ROWS < <(jq -r '.accounts[] | @base64' due.json)
