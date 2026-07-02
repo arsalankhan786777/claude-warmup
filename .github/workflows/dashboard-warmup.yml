@@ -26,9 +26,16 @@ jobs:
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "Due accounts: $COUNT"
 
+      - name: Cache npm downloads
+        if: steps.due.outputs.count != '0'
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-claude-code-v1
+
       - name: Install Claude Code CLI
         if: steps.due.outputs.count != '0'
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code --prefer-offline --no-audit --no-fund
 
       - name: Random pre-run delay (scheduled only, user-defined max)
         if: steps.due.outputs.count != '0' && github.event_name == 'schedule'
