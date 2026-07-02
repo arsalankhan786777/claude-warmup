@@ -111,10 +111,24 @@ jobs:
 
             MSG=$(echo "$OUTPUT" | head -c 200)
             RESP=$(echo "$OUTPUT" | head -c 4000)
+
+            # Fetch account usage from the CLI's OAuth usage endpoint (clean runner IP avoids
+            # the shared-IP rate limiting a Cloudflare Worker would hit). Read-only GET.
+            UOUT=$(curl -s -m 15 -w $'\n%{http_code}' \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "anthropic-beta: oauth-2025-04-20" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "User-Agent: claude-cli/2.0.0 (external, cli)" \
+              "https://api.anthropic.com/api/oauth/usage" 2>/dev/null || printf '\n0')
+            UCODE=$(printf '%s' "$UOUT" | tail -1)
+            UBODY=$(printf '%s' "$UOUT" | sed '$d' | head -c 4000)
+            [ -z "$UCODE" ] && UCODE=0
+
             RESULTS=$(echo "$RESULTS" | jq \
               --arg id "$ID" --arg st "$STATUS" --arg msg "$MSG" \
               --arg kind "$KIND" --arg prompt "$PROMPT" --arg resp "$RESP" \
-              '. + [{id:$id,status:$st,message:$msg,kind:$kind,prompt:$prompt,response:$resp}]')
+              --argjson ucode "$UCODE" --arg ubody "$UBODY" \
+              '. + [{id:$id,status:$st,message:$msg,kind:$kind,prompt:$prompt,response:$resp,usage:{status:$ucode,raw:$ubody}}]')
           done
 
           echo "$RESULTS" | jq '{results: .}' > report.json
