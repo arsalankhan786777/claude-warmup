@@ -30,8 +30,8 @@ jobs:
         if: steps.due.outputs.count != '0'
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Random delay
-        if: steps.due.outputs.count != '0'
+      - name: Random delay (scheduled runs only)
+        if: steps.due.outputs.count != '0' && github.event_name == 'schedule'
         run: |
           DELAY=$(shuf -i 10-300 -n 1)
           echo "Sleeping ${DELAY}s"
@@ -47,11 +47,25 @@ jobs:
           for row in $(jq -r '.accounts[] | @base64' due.json); do
             _jq() { echo "$row" | base64 -d | jq -r "$1"; }
             ID=$(_jq '.id'); LABEL=$(_jq '.label'); MODEL=$(_jq '.model'); TOKEN=$(_jq '.token')
+            THINKING=$(_jq '.thinking'); QUERY=$(_jq '.query // empty')
+
+            if [ -n "$QUERY" ]; then
+              PROMPT="$QUERY"; KIND="query"; TIMEOUT=300
+            else
+              PROMPT="ok"; KIND="warmup"; TIMEOUT=90
+            fi
+
+            THINK_ENV=""
+            if [ "$THINKING" = "false" ]; then
+              THINK_ENV="MAX_THINKING_TOKENS=0"
+            fi
+
             echo ""
-            echo "=== $LABEL ($MODEL) ==="
-            OUTPUT=$(timeout 90 env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" \
-              claude -p "ok" --model "$MODEL" </dev/null 2>&1) || true
-            echo "$OUTPUT"
+            echo "=== $LABEL ($MODEL, thinking=$THINKING, kind=$KIND) ==="
+            OUTPUT=$(timeout "$TIMEOUT" env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" $THINK_ENV \
+              claude -p "$PROMPT" --model "$MODEL" </dev/null 2>&1) || true
+            echo "$OUTPUT" | head -c 1000
+
             if echo "$OUTPUT" | grep -qiE "401|invalid auth|authentication_error"; then
               STATUS="auth_failed"
             elif echo "$OUTPUT" | grep -qiE "hit your limit|rate.?limit"; then
@@ -61,8 +75,13 @@ jobs:
             else
               STATUS="failed"
             fi
+
             MSG=$(echo "$OUTPUT" | head -c 200)
-            RESULTS=$(echo "$RESULTS" | jq --arg id "$ID" --arg st "$STATUS" --arg msg "$MSG" '. + [{id:$id,status:$st,message:$msg}]')
+            RESP=$(echo "$OUTPUT" | head -c 4000)
+            RESULTS=$(echo "$RESULTS" | jq \
+              --arg id "$ID" --arg st "$STATUS" --arg msg "$MSG" \
+              --arg kind "$KIND" --arg prompt "$PROMPT" --arg resp "$RESP" \
+              '. + [{id:$id,status:$st,message:$msg,kind:$kind,prompt:$prompt,response:$resp}]')
           done
           echo "$RESULTS" | jq '{results: .}' > report.json
           curl -sf -X POST -H "X-Warmup-Secret: $WARMUP_SECRET" \
@@ -70,4 +89,4 @@ jobs:
             --data @report.json "$DASHBOARD_URL/api/report" > /dev/null
           echo ""
           echo "=== Summary ==="
-          echo "$RESULTS" | jq -r '.[] | "\(.status)"' | sort | uniq -c
+          echo "$RESULTS" | jq -r '.[] | "\(.kind) \(.status)"' | sort | uniq -c
