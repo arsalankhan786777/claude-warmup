@@ -14,7 +14,7 @@ env:
 jobs:
   warmup:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: Fetch due accounts
         id: due
@@ -30,35 +30,66 @@ jobs:
         if: steps.due.outputs.count != '0'
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Random delay (scheduled runs only)
+      - name: Random pre-run delay (scheduled only, user-defined max)
         if: steps.due.outputs.count != '0' && github.event_name == 'schedule'
         run: |
-          DELAY=$(shuf -i 10-300 -n 1)
-          echo "Sleeping ${DELAY}s"
-          sleep $DELAY
+          MAXMIN=$(jq -r '.config.maxDelayMinutes // 5' due.json)
+          MAXSEC=$(( MAXMIN * 60 ))
+          if [ "$MAXSEC" -gt 0 ]; then
+            DELAY=$(shuf -i 0-"$MAXSEC" -n 1)
+            echo "Sleeping ${DELAY}s (max ${MAXMIN}m random)"
+            sleep "$DELAY"
+          fi
 
       - name: Ping due accounts and report back
         if: steps.due.outputs.count != '0'
         env:
           WARMUP_SECRET: ${{ secrets.WARMUP_SECRET }}
+          IS_SCHEDULE: ${{ github.event_name == 'schedule' }}
         run: |
           set -uo pipefail
+
+          RAND_PROMPT=$(jq -r '.config.randomizePrompt // true' due.json)
+          RAND_ORDER=$(jq -r '.config.randomizeOrder // true' due.json)
+          JITTER_SEC=$(jq -r '.config.perAccountJitterSec // 30' due.json)
+
+          # innocuous, human-looking warmup messages (varied to avoid a fixed signature)
+          POOL=("ok" "hi" "hey" "hello" "thanks" "got it" "cool" "yep" "sounds good" "great" "noted" "sure" "thanks!" "ok cool" "perfect")
+
+          # account rows, optionally shuffled
+          mapfile -t ROWS < <(jq -r '.accounts[] | @base64' due.json)
+          if [ "$RAND_ORDER" = "true" ]; then
+            mapfile -t ROWS < <(printf '%s\n' "${ROWS[@]}" | shuf)
+          fi
+
           RESULTS="[]"
-          for row in $(jq -r '.accounts[] | @base64' due.json); do
+          FIRST=1
+          for row in "${ROWS[@]}"; do
             _jq() { echo "$row" | base64 -d | jq -r "$1"; }
             ID=$(_jq '.id'); LABEL=$(_jq '.label'); MODEL=$(_jq '.model'); TOKEN=$(_jq '.token')
             THINKING=$(_jq '.thinking'); QUERY=$(_jq '.query // empty')
 
+            # small random gap between accounts (scheduled runs only), so pings don't cluster
+            if [ "$IS_SCHEDULE" = "true" ] && [ "$FIRST" != "1" ] && [ "$JITTER_SEC" -gt 0 ]; then
+              G=$(shuf -i 0-"$JITTER_SEC" -n 1)
+              echo "  (jitter ${G}s)"
+              sleep "$G"
+            fi
+            FIRST=0
+
             if [ -n "$QUERY" ]; then
               PROMPT="$QUERY"; KIND="query"; TIMEOUT=300
             else
-              PROMPT="ok"; KIND="warmup"; TIMEOUT=90
+              KIND="warmup"; TIMEOUT=90
+              if [ "$RAND_PROMPT" = "true" ]; then
+                PROMPT="${POOL[$RANDOM % ${#POOL[@]}]}"
+              else
+                PROMPT="ok"
+              fi
             fi
 
             THINK_ENV=""
-            if [ "$THINKING" = "false" ]; then
-              THINK_ENV="MAX_THINKING_TOKENS=0"
-            fi
+            [ "$THINKING" = "false" ] && THINK_ENV="MAX_THINKING_TOKENS=0"
 
             echo ""
             echo "=== $LABEL ($MODEL, thinking=$THINKING, kind=$KIND) ==="
@@ -83,6 +114,7 @@ jobs:
               --arg kind "$KIND" --arg prompt "$PROMPT" --arg resp "$RESP" \
               '. + [{id:$id,status:$st,message:$msg,kind:$kind,prompt:$prompt,response:$resp}]')
           done
+
           echo "$RESULTS" | jq '{results: .}' > report.json
           curl -sf -X POST -H "X-Warmup-Secret: $WARMUP_SECRET" \
             -H "Content-Type: application/json" \
