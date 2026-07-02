@@ -1,0 +1,73 @@
+name: Dashboard Warmup
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: dashboard-warmup
+  cancel-in-progress: false
+
+env:
+  DASHBOARD_URL: https://claude-warmup-dashboard.arsalan-warmup.workers.dev
+
+jobs:
+  warmup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Fetch due accounts
+        id: due
+        env:
+          WARMUP_SECRET: ${{ secrets.WARMUP_SECRET }}
+        run: |
+          curl -sf -H "X-Warmup-Secret: $WARMUP_SECRET" "$DASHBOARD_URL/api/due" > due.json
+          COUNT=$(jq '.accounts | length' due.json)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Due accounts: $COUNT"
+
+      - name: Install Claude Code CLI
+        if: steps.due.outputs.count != '0'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Random delay
+        if: steps.due.outputs.count != '0'
+        run: |
+          DELAY=$(shuf -i 10-300 -n 1)
+          echo "Sleeping ${DELAY}s"
+          sleep $DELAY
+
+      - name: Ping due accounts and report back
+        if: steps.due.outputs.count != '0'
+        env:
+          WARMUP_SECRET: ${{ secrets.WARMUP_SECRET }}
+        run: |
+          set -uo pipefail
+          RESULTS="[]"
+          for row in $(jq -r '.accounts[] | @base64' due.json); do
+            _jq() { echo "$row" | base64 -d | jq -r "$1"; }
+            ID=$(_jq '.id'); LABEL=$(_jq '.label'); MODEL=$(_jq '.model'); TOKEN=$(_jq '.token')
+            echo ""
+            echo "=== $LABEL ($MODEL) ==="
+            OUTPUT=$(timeout 90 env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" \
+              claude -p "ok" --model "$MODEL" </dev/null 2>&1) || true
+            echo "$OUTPUT"
+            if echo "$OUTPUT" | grep -qiE "401|invalid auth|authentication_error"; then
+              STATUS="auth_failed"
+            elif echo "$OUTPUT" | grep -qiE "hit your limit|rate.?limit"; then
+              STATUS="rate_limited"
+            elif [ -n "$OUTPUT" ]; then
+              STATUS="ok"
+            else
+              STATUS="failed"
+            fi
+            MSG=$(echo "$OUTPUT" | head -c 200)
+            RESULTS=$(echo "$RESULTS" | jq --arg id "$ID" --arg st "$STATUS" --arg msg "$MSG" '. + [{id:$id,status:$st,message:$msg}]')
+          done
+          echo "$RESULTS" | jq '{results: .}' > report.json
+          curl -sf -X POST -H "X-Warmup-Secret: $WARMUP_SECRET" \
+            -H "Content-Type: application/json" \
+            --data @report.json "$DASHBOARD_URL/api/report" > /dev/null
+          echo ""
+          echo "=== Summary ==="
+          echo "$RESULTS" | jq -r '.[] | "\(.status)"' | sort | uniq -c
