@@ -108,7 +108,7 @@ jobs:
 
             if echo "$OUTPUT" | grep -qiE "401|invalid auth|authentication_error"; then
               STATUS="auth_failed"
-            elif echo "$OUTPUT" | grep -qiE "hit your limit|rate.?limit"; then
+            elif echo "$OUTPUT" | grep -qiE "(hit|reached) your [a-z ]*limit|rate.?limit"; then
               STATUS="rate_limited"
             elif [ -n "$OUTPUT" ]; then
               STATUS="ok"
